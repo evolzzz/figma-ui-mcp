@@ -9,6 +9,7 @@
   <a href="https://registry.modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-Registry-purple" alt="MCP Registry" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
   <a href="https://github.com/TranHoaiHung/figma-ui-mcp/stargazers"><img src="https://img.shields.io/github/stars/TranHoaiHung/figma-ui-mcp?style=social" alt="GitHub stars" /></a>
+  <a href="https://mcpvault.io/servers/figma-ui-mcp/health?utm_source=external_badge&utm_medium=referral&utm_campaign=mcp_health_report"><img src="https://mcpvault.io/badge/figma-ui-mcp.svg" alt="MCPVault: claimed" /></a>
 </p>
 
 <p align="center">
