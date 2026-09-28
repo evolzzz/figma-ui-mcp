@@ -63,7 +63,7 @@ handlers.get_node_detail = async function(params) {
           return sd;
         });
       }
-      detail.strokeWeight = node.strokeWeight;
+      detail.strokeWeight = typeof node.strokeWeight === "symbol" ? "mixed" : node.strokeWeight;
       detail.strokeAlign = node.strokeAlign;
     }
   } catch(e) {}
@@ -131,15 +131,17 @@ handlers.get_node_detail = async function(params) {
     try {
       detail.content = node.characters;
       detail.color = getFillHex(node);
-      detail.fontSize = node.fontSize + "px";
-      detail.fontFamily = node.fontName ? node.fontName.family : null;
-      detail.fontWeight = node.fontName ? node.fontName.style : null;
-      if (node.lineHeight) {
+      detail.fontSize = typeof node.fontSize === "symbol" ? "mixed" : node.fontSize + "px";
+      detail.fontFamily = typeof node.fontName === "symbol" ? "mixed" : (node.fontName ? node.fontName.family : null);
+      detail.fontWeight = typeof node.fontName === "symbol" ? "mixed" : (node.fontName ? node.fontName.style : null);
+      if (typeof node.lineHeight === "symbol") detail.lineHeight = "mixed";
+      else if (node.lineHeight) {
         if (node.lineHeight.unit === "AUTO") detail.lineHeight = "normal";
         else if (node.lineHeight.unit === "PERCENT") detail.lineHeight = Math.round(node.lineHeight.value) + "%";
         else detail.lineHeight = node.lineHeight.value + "px";
       }
-      if (node.letterSpacing && node.letterSpacing.value !== 0) detail.letterSpacing = node.letterSpacing.value + "px";
+      if (typeof node.letterSpacing === "symbol") detail.letterSpacing = "mixed";
+      else if (node.letterSpacing && node.letterSpacing.value !== 0) detail.letterSpacing = node.letterSpacing.value + "px";
       detail.textAlign = node.textAlignHorizontal ? node.textAlignHorizontal.toLowerCase() : null;
     } catch(e) { try { detail.content = node.characters; } catch(e2) {} }
   }
@@ -308,7 +310,7 @@ handlers.get_css = async function(params) {
   }
 
   // Stroke / border
-  if (detail.stroke) lines.push("border: " + (detail.strokeWeight || 1) + "px solid " + detail.stroke + ";");
+  if (detail.stroke && detail.strokeWeight !== "mixed") lines.push("border: " + (detail.strokeWeight !== undefined ? detail.strokeWeight : 1) + "px solid " + detail.stroke + ";");
 
   // Border radius
   if (detail.borderRadius) lines.push("border-radius: " + detail.borderRadius + ";");
@@ -324,15 +326,15 @@ handlers.get_css = async function(params) {
 
   // Typography (TEXT nodes)
   if (detail.color) lines.push("color: " + detail.color + ";");
-  if (detail.fontSize) lines.push("font-size: " + detail.fontSize + ";");
-  if (detail.fontFamily) lines.push("font-family: \"" + detail.fontFamily + "\", sans-serif;");
-  if (detail.fontWeight) {
+  if (detail.fontSize && detail.fontSize !== "mixed") lines.push("font-size: " + detail.fontSize + ";");
+  if (detail.fontFamily && detail.fontFamily !== "mixed") lines.push("font-family: \"" + detail.fontFamily + "\", sans-serif;");
+  if (detail.fontWeight && detail.fontWeight !== "mixed") {
     var weightMap = { "Thin": 100, "ExtraLight": 200, "Light": 300, "Regular": 400, "Medium": 500, "SemiBold": 600, "Bold": 700, "ExtraBold": 800, "Black": 900 };
     var wNum = weightMap[detail.fontWeight] || detail.fontWeight;
     lines.push("font-weight: " + wNum + ";");
   }
-  if (detail.lineHeight) lines.push("line-height: " + detail.lineHeight + ";");
-  if (detail.letterSpacing) lines.push("letter-spacing: " + detail.letterSpacing + ";");
+  if (detail.lineHeight && detail.lineHeight !== "mixed") lines.push("line-height: " + detail.lineHeight + ";");
+  if (detail.letterSpacing && detail.letterSpacing !== "mixed") lines.push("letter-spacing: " + detail.letterSpacing + ";");
   if (detail.textAlign) lines.push("text-align: " + detail.textAlign.toLowerCase() + ";");
   if (detail.textDecoration) lines.push("text-decoration: " + detail.textDecoration.toLowerCase() + ";");
 

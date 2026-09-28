@@ -157,3 +157,21 @@ handlers.removeReactions = async function(params) {
   // Clearing uses the same capability checks and async setter as replacement.
   return handlers.setReactions(Object.assign({}, params, { reactions: [] }));
 };
+
+// Match the documented scroll operation on every node exposing Figma's scroll
+// properties. Validate the complete request before changing either property.
+handlers.setScrollBehavior = async function(params) {
+  var node = await resolveNode(params);
+  if (!node || !("overflowDirection" in node)) throw new Error("Target does not support scrolling");
+  var direction = params.overflowDirection;
+  if (direction === "BOTH") direction = "HORIZONTAL_AND_VERTICAL";
+  if (direction !== undefined && ["NONE", "HORIZONTAL", "VERTICAL", "HORIZONTAL_AND_VERTICAL"].indexOf(direction) === -1) {
+    throw new Error("overflowDirection must be NONE, HORIZONTAL, VERTICAL, or HORIZONTAL_AND_VERTICAL (BOTH)");
+  }
+  if (params.clipsContent !== undefined && (typeof params.clipsContent !== "boolean" || !("clipsContent" in node))) {
+    throw new Error("clipsContent requires a boolean and a clipping-capable target");
+  }
+  if (direction !== undefined) node.overflowDirection = direction;
+  if (params.clipsContent !== undefined) node.clipsContent = params.clipsContent;
+  return { id: node.id, overflowDirection: node.overflowDirection, clipsContent: node.clipsContent };
+};

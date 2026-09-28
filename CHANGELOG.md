@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+- Separate plugin log/control messages from operation responses so auto-layout warnings do not increment the error counter or send responses with an undefined request ID.
+- Resolve variant component properties through their component set, reject ambiguous bare property names, and explain why variant dimensions cannot be deleted through the ordinary property API.
+- Load all required fonts before text layout edits, preserve mixed font runs on content-only updates, and read mixed text styles without converting Figma's Symbol sentinel into a token string.
+- Implement the documented `setScrollBehavior` operation, including the `BOTH` alias, and validate instance parents before creating nodes. Failed instantiation removes only the newly created instance.
 - Keep one polling owner across reconnects, use a request-scoped 12-second deadline for all 8-second long polls, and leave healthy polls running when a tab becomes visible.
 - Deliver already-received commands once and return their results to the originating bridge after a port switch.
 - Bind the bridge to the same IPv4 loopback address used by health checks and proxy requests. Preserve occupied ports, reject bind failures, and reuse responsive bridges even when their plugin is temporarily disconnected.

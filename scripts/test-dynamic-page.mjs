@@ -89,7 +89,7 @@ function loadPluginContext() {
       },
       async loadFontAsync() {},
       // findAll defaults for other handlers we don't exercise
-      currentPage: { findAll: () => [] },
+      currentPage: { type: "PAGE", findAll: () => [], appendChild() {} },
     },
     console,
   };

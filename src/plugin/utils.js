@@ -186,3 +186,58 @@ function nodeToInfo(node) {
   if ("height" in node) info.height = Math.round(node.height);
   return info;
 }
+
+// Variant children share definitions owned by their component set. Accessing
+// componentPropertyDefinitions on the variant itself throws in the real API.
+function getComponentPropertyOwner(node) {
+  if (node && node.type === "COMPONENT" && node.parent && node.parent.type === "COMPONENT_SET") return node.parent;
+  return node;
+}
+
+function resolveComponentPropertyName(componentNode, propertyName) {
+  var owner = getComponentPropertyOwner(componentNode);
+  var definitions = owner && owner.componentPropertyDefinitions;
+  if (!definitions) return null;
+  if (Object.prototype.hasOwnProperty.call(definitions, propertyName)) return propertyName;
+  var matches = Object.keys(definitions).filter(function(key) { return key.split("#")[0] === propertyName; });
+  // Duplicate display names are legal in Figma; choosing the first can edit or
+  // delete another property's value. Callers can always pass the full #ID key.
+  if (matches.length > 1) throw new Error("Ambiguous component property '" + propertyName + "'. Use a full property name: " + matches.join(", "));
+  return matches.length ? matches[0] : null;
+}
+
+function findInstanceAncestor(node) {
+  var parent = node && node.parent;
+  while (parent) {
+    if (parent.type === "INSTANCE") return parent;
+    parent = parent.parent;
+  }
+  return null;
+}
+
+function requireWritableParent(parent) {
+  if (!parent || parent.removed || typeof parent.appendChild !== "function") throw new Error("Target parent does not accept child nodes");
+  if (parent.type === "INSTANCE" || findInstanceAncestor(parent)) {
+    throw new Error("Cannot insert children inside an instance. Edit its main component or use component properties.");
+  }
+}
+
+// Font loading is required for every text layout mutation, including resize-only
+// updates. Mixed-font text must load all runs without flattening them to one font.
+async function loadTextFonts(node) {
+  if (!node || node.type !== "TEXT") return;
+  if (node.hasMissingFont) throw new Error("Text node has missing fonts. Install them or explicitly choose a replacement font.");
+  var fonts = [];
+  if (typeof node.fontName === "symbol") {
+    fonts = node.getRangeAllFontNames(0, node.characters.length);
+  } else if (node.fontName) {
+    fonts = [node.fontName];
+  }
+  var loaded = {};
+  for (var i = 0; i < fonts.length; i++) {
+    var key = JSON.stringify(fonts[i]);
+    if (loaded[key]) continue;
+    await figma.loadFontAsync(fonts[i]);
+    loaded[key] = true;
+  }
+}

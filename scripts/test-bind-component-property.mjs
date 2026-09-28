@@ -49,6 +49,7 @@ console.log("\nLayer B: bindComponentProperty (mocked Figma)");
 
 // Build a minimal sandbox with the plugin handler code
 function loadHandlers(mockFigma) {
+  const utils = readFileSync("src/plugin/utils.js", "utf-8");
   const src = readFileSync("src/plugin/handlers-tokens.js", "utf-8");
   const ctx = {
     figma: mockFigma,
@@ -60,7 +61,9 @@ function loadHandlers(mockFigma) {
     Promise, Object, Array, String, Number, JSON, parseInt, Error,
   };
   vm.createContext(ctx);
-  vm.runInContext(src, ctx);
+  vm.runInContext(utils + "\n" + src, ctx);
+  // Keep node lookup isolated while exercising the real shared property helpers.
+  ctx.findNodeByIdAsync = async id => mockFigma._nodes[id] || null;
   return ctx.handlers;
 }
 

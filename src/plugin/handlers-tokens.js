@@ -845,21 +845,6 @@ handlers.applyTextStyle = async function(params) {
 // Variant properties (type "VARIANT") are intentionally not creatable here —
 // Figma manages those through ComponentSet children and `combineAsVariants()`.
 
-// Resolve "PropName" to "PropName#1:2" by searching componentPropertyDefinitions.
-// Figma appends a unique `#id` suffix to every property; APIs that consume the
-// name (componentPropertyReferences, deleteComponentProperty) require the
-// fully-qualified form. Pass it in directly and it's returned unchanged.
-function resolveComponentPropertyName(componentNode, propertyName) {
-  var defs = componentNode.componentPropertyDefinitions;
-  if (!defs) return null;
-  if (defs[propertyName]) return propertyName;
-  var keys = Object.keys(defs);
-  for (var i = 0; i < keys.length; i++) {
-    if (keys[i].split("#")[0] === propertyName) return keys[i];
-  }
-  return null;
-}
-
 // addComponentProperty — create a property definition on a Component or ComponentSet.
 // type: "TEXT" | "BOOLEAN" | "INSTANCE_SWAP"
 // For TEXT: defaultValue is a string. Pair with bindComponentPropertyToText so
@@ -893,6 +878,7 @@ handlers.addComponentProperty = async function(params) {
   if (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET") {
     throw new Error("addComponentProperty requires a COMPONENT or COMPONENT_SET node, got: " + node.type);
   }
+  node = getComponentPropertyOwner(node);
 
   if (type === "TEXT" && typeof defaultValue !== "string") {
     throw new Error("TEXT properties require a string defaultValue");
@@ -956,6 +942,7 @@ handlers.bindComponentPropertyToText = async function(params) {
     owner = owner.parent;
   }
   if (!owner) throw new Error("Text node is not inside a COMPONENT or COMPONENT_SET");
+  owner = getComponentPropertyOwner(owner);
 
   var resolved = resolveComponentPropertyName(owner, propertyName);
   if (!resolved) {
@@ -1028,6 +1015,7 @@ handlers.bindComponentProperty = async function(params) {
     owner = owner.parent;
   }
   if (!owner) throw new Error("Node is not inside a COMPONENT or COMPONENT_SET");
+  owner = getComponentPropertyOwner(owner);
 
   var resolved = resolveComponentPropertyName(owner, propertyName);
   if (!resolved) {
@@ -1104,12 +1092,16 @@ handlers.removeComponentProperty = async function(params) {
   if (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET") {
     throw new Error("removeComponentProperty requires a COMPONENT or COMPONENT_SET node, got: " + node.type);
   }
+  node = getComponentPropertyOwner(node);
 
   var resolved = resolveComponentPropertyName(node, propertyName);
   if (!resolved) {
     throw new Error("Property '" + propertyName + "' not found on component '" + node.name + "'");
   }
 
+  if (node.componentPropertyDefinitions[resolved].type === "VARIANT") {
+    throw new Error("VARIANT properties are managed through component variant names and cannot be deleted with removeComponentProperty.");
+  }
   node.deleteComponentProperty(resolved);
 
   return {

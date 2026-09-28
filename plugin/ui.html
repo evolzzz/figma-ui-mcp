@@ -360,8 +360,8 @@
     }
 
     window.onmessage = async function(event) {
-      var msg = event.data.pluginMessage;
-      if (!msg) return;
+      var msg = event.data && event.data.pluginMessage;
+      if (!msg || typeof msg !== "object") return;
       // Session info from plugin main thread
       if (msg.type === "session-info") {
         sessionId = msg.sessionId || null;
@@ -369,6 +369,13 @@
         if (sessionId) log("Session: " + sessionId + " (" + fileName + ")", "info");
         return;
       }
+      // Informational messages are not operation responses. In particular,
+      // auto-layout warnings have no request ID and must not count as failures.
+      if (msg.type === "log") {
+        if (typeof msg.message === "string") log(msg.message, "info");
+        return;
+      }
+      if (typeof msg.id !== "string" || typeof msg.success !== "boolean" || !responseBridges.has(msg.id)) return;
       var isRead = READ_OPS.indexOf(msg.operation) >= 0;
       if (msg.success) {
         if (isRead) { readCount++; document.getElementById("read-count").textContent = readCount; }

@@ -23,7 +23,7 @@
   "scripts": {
     "start": "node server/index.js",
     "build:plugin": "node scripts/build-plugin.js",
-    "test:regressions": "node --test scripts/test-polling.mjs scripts/test-bridge-lifecycle.mjs scripts/test-authoring.mjs",
+    "test:regressions": "node --test scripts/test-polling.mjs scripts/test-bridge-lifecycle.mjs scripts/test-authoring.mjs scripts/test-write-failures.mjs",
     "dev": "node --watch scripts/build-plugin.js"
   },
   "dependencies": {

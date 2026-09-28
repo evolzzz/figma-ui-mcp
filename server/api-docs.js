@@ -1013,7 +1013,8 @@ await figma.removeReactions({ id: nodeId })
 
 // Scroll behavior
 await figma.setScrollBehavior({ id: frameId, overflowDirection: "VERTICAL", clipsContent: true });
-// overflowDirection: "NONE" | "HORIZONTAL" | "VERTICAL" | "BOTH"
+// overflowDirection: "NONE" | "HORIZONTAL" | "VERTICAL" | "HORIZONTAL_AND_VERTICAL"
+// "BOTH" is also accepted as an alias for "HORIZONTAL_AND_VERTICAL".
 
 // Component variants & swap
 await figma.setComponentProperties({ id: instanceId, properties: { "Size": "Large", "State": "Active" } });
@@ -1025,7 +1026,9 @@ await figma.getComponentProperties({ id: instanceId });
 // property to the child text layer, setting characters on the instance only
 // changes content data; the layout won't re-measure for flexible width.
 //
-// Step 1: create the property on the master component
+// Step 1: create the property on the master component.
+// A variant's definitions belong to its COMPONENT_SET; the result identifies
+// that owner. Keep propertyName (including #ID), since display names can repeat.
 var prop = await figma.addComponentProperty({
   componentId: btnComponentId,
   name: "label",
@@ -1038,23 +1041,25 @@ var prop = await figma.addComponentProperty({
 // makes auto-layout actually re-measure on instance override.
 await figma.bindComponentPropertyToText({
   textNodeId: btnLabelTextId,
-  propertyName: "label",              // bare name OK — resolved to "label#5:0"
+  propertyName: prop.propertyName,
 });
 
 // Step 3: instantiate + drive the property — auto-layout will reflow here
 var inst = await figma.instantiate({ componentName: "btn/primary", x: 100, y: 200 });
 await figma.setComponentProperties({
   id: inst.id,
-  properties: { "label": "A much longer button label" }   // bare name resolved
+  properties: { [prop.propertyName]: "A much longer button label" }
 });
 // → button width grows to fit the longer text (v2.5.24+ auto-promotes TEXT to HUG sizing)
 
-// Read current property values on an instance
+// Read current property values on an INSTANCE (not its master component).
+// For master definitions, read get_design({ id: componentId }).tree.componentPropertyDefinitions.
 var props = await figma.getComponentProperties({ id: inst.id });
 // → { id, name, properties: { "label#5:0": { type: "TEXT", value: "..." } } }
 
 // Cleanup
-await figma.removeComponentProperty({ componentId: btnComponentId, propertyName: "label" });
+await figma.removeComponentProperty({ componentId: btnComponentId, propertyName: prop.propertyName });
+// VARIANT dimensions are managed by variant names, not removeComponentProperty.
 
 // ── Generic bindComponentProperty (BOOLEAN + INSTANCE_SWAP) — v2.5.22+ ─────
 // bindComponentPropertyToText is TEXT-only. For BOOLEAN visibility or

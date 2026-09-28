@@ -386,6 +386,7 @@ handlers.create = async (params) => {
     );
     parent = p;
   }
+  requireWritableParent(parent);
 
   let node;
   switch (type) {
@@ -498,6 +499,29 @@ handlers.modify = async (params) => {
   }
   if (node.removed) throw new Error("Node was deleted: " + nodeRef);
 
+  // Validate immutable instance geometry and prepare fonts before any mutation,
+  // so a rejected layout edit does not first change fills, names, or dimensions.
+  if ((params.x !== undefined || params.y !== undefined) && findInstanceAncestor(node)) {
+    throw new Error("Cannot change relative position inside an instance. Edit its main component or use component properties.");
+  }
+  var replacementFont = null;
+  if (node.type === "TEXT") {
+    if (params.fontFamily !== undefined || params.fontWeight !== undefined) {
+      var currentFont = node.fontName;
+      if (typeof currentFont === "symbol" && (!params.fontFamily || !params.fontWeight)) {
+        throw new Error("Mixed-font text requires both fontFamily and fontWeight for a whole-node font replacement.");
+      }
+      replacementFont = {
+        family: params.fontFamily || currentFont.family,
+        style: params.fontWeight !== undefined ? (FONT_STYLE_MAP[params.fontWeight] || String(params.fontWeight)) : currentFont.style,
+      };
+      await figma.loadFontAsync(replacementFont);
+      node.fontName = replacementFont;
+    } else if (["content", "fontSize", "width", "height", "textAutoResize", "textAlign", "textAlignVertical", "lineHeight", "layoutSizingHorizontal", "layoutSizingVertical"].some(function(key) { return params[key] !== undefined; })) {
+      await loadTextFonts(node);
+    }
+  }
+
   if (params.fontColor !== undefined && params.fill === undefined) params.fill = params.fontColor;
   if (params.fill     !== undefined && "fills"   in node) node.fills   = buildFillArray(params.fill, params.fillOpacity);
   if (params.fillOpacity !== undefined && params.fill === undefined && "fills" in node && node.fills && node.fills.length) {
@@ -535,26 +559,19 @@ handlers.modify = async (params) => {
   }
 
   if (node.type === "TEXT") {
-    if (params.content !== undefined || params.fontWeight !== undefined || params.fontFamily !== undefined) {
-      const family = params.fontFamily || node.fontName.family;
-      const style = FONT_STYLE_MAP[params.fontWeight] || node.fontName.style;
-      await figma.loadFontAsync({ family, style });
-      node.fontName = { family, style };
-      if (params.content !== undefined) {
-        node.characters = params.content;
-        if (params.width === undefined && params.textAutoResize === undefined &&
-            node.textAutoResize !== "NONE") {
-          node.textAutoResize = "WIDTH_AND_HEIGHT";
-        }
-        // Auto-promote layoutSizing so a hug-mode auto-layout parent actually
-        // reflows in response to the new content. textAutoResize alone is
-        // overridden by layoutSizingHorizontal:FIXED for auto-layout children.
-        autoPromoteTextHugForReflow(node, params);
+    if (params.content !== undefined) {
+      node.characters = params.content;
+      if (params.width === undefined && params.textAutoResize === undefined &&
+          node.textAutoResize !== "NONE") {
+        node.textAutoResize = "WIDTH_AND_HEIGHT";
       }
+      // Auto-promote layoutSizing so a hug-mode auto-layout parent actually
+      // reflows in response to the new content. textAutoResize alone is
+      // overridden by layoutSizingHorizontal:FIXED for auto-layout children.
+      autoPromoteTextHugForReflow(node, params);
     }
     if (params.fontSize !== undefined) node.fontSize = params.fontSize;
     if (params.textAlign !== undefined || params.textAlignVertical !== undefined || params.lineHeight !== undefined) {
-      await figma.loadFontAsync(node.fontName);
       if (params.textAlign         !== undefined) node.textAlignHorizontal = params.textAlign.toUpperCase();
       if (params.textAlignVertical !== undefined) node.textAlignVertical   = params.textAlignVertical.toUpperCase();
       if (params.lineHeight !== undefined) {
@@ -741,49 +758,58 @@ handlers.instantiate = async function(params) {
   }
   if (!comp) throw new Error("Component " + (componentId || componentName) + " not found");
 
-  var inst = comp.createInstance();
-  inst.x = x;
-  inst.y = y;
-
   var parent = parentId ? (await findNodeByIdAsync(parentId)) : (parentName ? findNodeByName(parentName) : null);
-  if (parent) parent.appendChild(inst);
+  if ((parentId || parentName) && !parent) throw new Error("Target parent not found: " + (parentId || parentName));
+  requireWritableParent(parent || figma.currentPage);
 
-  if (overrides && typeof overrides === "object") {
-    var overrideKeys = Object.keys(overrides);
-    for (var oi = 0; oi < overrideKeys.length; oi++) {
-      var layerName = overrideKeys[oi];
-      var ov = overrides[layerName];
-      // Use IIFE to capture layerName for synchronous findOne callback
-      var target = (function(lName) {
-        return inst.findOne(function(n) { return n.name === lName; });
-      })(layerName);
-      if (!target) continue;
+  var inst = comp.createInstance();
+  try {
+    if (parent) parent.appendChild(inst);
+    // Reparenting resets coordinates, so position the instance after attachment.
+    inst.x = x;
+    inst.y = y;
 
-      if (ov.text !== undefined && target.type === "TEXT") {
-        await figma.loadFontAsync(target.fontName);
-        target.characters = String(ov.text);
-      }
-      if (ov.fill !== undefined) {
-        var fillNorm = normalizeHex(ov.fill);
-        if (fillNorm) target.fills = solidFill(fillNorm);
-      }
-      if (ov.stroke !== undefined) {
-        var strokeNorm = normalizeHex(ov.stroke);
-        if (strokeNorm) target.strokes = solidStroke(strokeNorm);
-      }
-      if (ov.opacity    !== undefined) target.opacity    = ov.opacity;
-      if (ov.visible    !== undefined) target.visible    = Boolean(ov.visible);
-      if (ov.fontSize   !== undefined && target.type === "TEXT") {
-        await figma.loadFontAsync(target.fontName);
-        target.fontSize = ov.fontSize;
-      }
-      if (ov.cornerRadius !== undefined && "cornerRadius" in target) {
-        target.cornerRadius = ov.cornerRadius;
+    if (overrides && typeof overrides === "object") {
+      var overrideKeys = Object.keys(overrides);
+      for (var oi = 0; oi < overrideKeys.length; oi++) {
+        var layerName = overrideKeys[oi];
+        var ov = overrides[layerName];
+        // Use IIFE to capture layerName for synchronous findOne callback
+        var target = (function(lName) {
+          return inst.findOne(function(n) { return n.name === lName; });
+        })(layerName);
+        if (!target) continue;
+
+        if (ov.text !== undefined && target.type === "TEXT") {
+          await loadTextFonts(target);
+          target.characters = String(ov.text);
+        }
+        if (ov.fill !== undefined) {
+          var fillNorm = normalizeHex(ov.fill);
+          if (fillNorm) target.fills = solidFill(fillNorm);
+        }
+        if (ov.stroke !== undefined) {
+          var strokeNorm = normalizeHex(ov.stroke);
+          if (strokeNorm) target.strokes = solidStroke(strokeNorm);
+        }
+        if (ov.opacity    !== undefined) target.opacity    = ov.opacity;
+        if (ov.visible    !== undefined) target.visible    = Boolean(ov.visible);
+        if (ov.fontSize   !== undefined && target.type === "TEXT") {
+          await loadTextFonts(target);
+          target.fontSize = ov.fontSize;
+        }
+        if (ov.cornerRadius !== undefined && "cornerRadius" in target) {
+          target.cornerRadius = ov.cornerRadius;
+        }
       }
     }
-  }
 
-  return nodeToInfo(inst);
+    return nodeToInfo(inst);
+  } catch (error) {
+    // Only remove the instance created by this call, never the existing master.
+    if (!inst.removed) inst.remove();
+    throw error;
+  }
 };
 
 // ─── INSTANCE PROPERTY OPERATIONS ─────────────────────────────────────────────
@@ -803,21 +829,6 @@ async function getMainComponentSafe(instance) {
     return await instance.getMainComponentAsync();
   }
   return instance.mainComponent;
-}
-
-// Resolve "label" → "label#5:0" using the already-fetched main component's
-// componentPropertyDefinitions. Caller passes `main` so we don't re-fetch it
-// per key.
-function resolvePropertyNameAgainstMain(main, propertyName) {
-  if (!main) return null;
-  var defs = main.componentPropertyDefinitions;
-  if (!defs) return null;
-  if (defs[propertyName]) return propertyName;
-  var keys = Object.keys(defs);
-  for (var i = 0; i < keys.length; i++) {
-    if (keys[i].split("#")[0] === propertyName) return keys[i];
-  }
-  return null;
 }
 
 // setComponentProperties — set property values on a component instance.
@@ -842,13 +853,15 @@ handlers.setComponentProperties = async function(params) {
   // Fetch main once — dynamic-page-safe — and reuse for every property lookup
   // plus the diagnostic on unknown names.
   var main = await getMainComponentSafe(node);
+  var owner = getComponentPropertyOwner(main);
+  var definitions = (owner && owner.componentPropertyDefinitions) || {};
 
   var resolvedMap = {};
   var unresolved = [];
   var keys = Object.keys(properties);
   for (var i = 0; i < keys.length; i++) {
     var name = keys[i];
-    var resolved = resolvePropertyNameAgainstMain(main, name);
+    var resolved = resolveComponentPropertyName(owner, name);
     if (!resolved) {
       unresolved.push(name);
       continue;
@@ -857,8 +870,7 @@ handlers.setComponentProperties = async function(params) {
   }
 
   if (unresolved.length > 0) {
-    var available = (main && main.componentPropertyDefinitions)
-      ? Object.keys(main.componentPropertyDefinitions) : [];
+    var available = Object.keys(definitions);
     throw new Error(
       "Unknown component property: " + unresolved.join(", ") +
       ". Available on main component: " + (available.length ? available.join(", ") : "(none — call addComponentProperty first)")
@@ -881,7 +893,7 @@ handlers.setComponentProperties = async function(params) {
   // sizing-axes) that may merge after this one. Once both land, this block
   // can be replaced with a call to the shared autoPromoteTextHugForReflow.
   if (typeof node.findAll === "function") {
-    var defs = (main && main.componentPropertyDefinitions) || {};
+    var defs = definitions;
     var changedKeys = Object.keys(resolvedMap);
     for (var ck = 0; ck < changedKeys.length; ck++) {
       var key = changedKeys[ck];

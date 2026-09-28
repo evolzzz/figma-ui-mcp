@@ -195,3 +195,26 @@ test("HTTP errors, malformed JSON, and invalid envelopes recover without duplica
   assert.equal(plugin.metrics.maximum, 1);
   assert.equal(plugin.metrics.aborts, 0);
 });
+
+test("layout warnings and control messages do not count as failed writes or send orphan responses", async () => {
+  const plugin = createPlugin();
+  await plugin.context.window.onmessage({ data: { pluginMessage: { type: "log", message: "Auto-layout controls child placement" } } });
+  await plugin.context.window.onmessage({ data: { pluginMessage: { type: "control" } } });
+  await plugin.context.window.onmessage({ data: null });
+  await plugin.context.window.onmessage({ data: { pluginMessage: { id: "unknown", success: false, error: "not a pending request" } } });
+  assert.equal(plugin.context.errCount, 0);
+  assert.equal(plugin.context.writeCount, 0);
+  assert.equal(plugin.metrics.responses.length, 0);
+});
+
+test("a genuine failed operation is counted and returned exactly once", async () => {
+  const request = { id: "write-request", operation: "modify", params: {} };
+  const plugin = createPlugin([{ delay: 0, body: { requests: [request] } }]);
+  await plugin.advance(0);
+  const message = { data: { pluginMessage: { id: request.id, operation: "modify", success: false, error: "Invalid target" } } };
+  await plugin.context.window.onmessage(message);
+  await plugin.context.window.onmessage(message);
+  assert.equal(plugin.context.errCount, 1);
+  assert.equal(plugin.metrics.responses.length, 1);
+  assert.equal(plugin.metrics.responses[0].body.success, false);
+});

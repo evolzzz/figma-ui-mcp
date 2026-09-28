@@ -241,20 +241,35 @@ function extractDesignTree(node, depth, maxDepth, detailLevel, filterInvisible) 
     try {
       info.content = node.characters;
       info.fill = getFillHex(node);
-      info.fontSize = node.fontSize;
-      info.fontFamily = node.fontName ? node.fontName.family : null;
-      info.fontWeight = node.fontName ? node.fontName.style : null;
-      if (node.lineHeight) {
+      // figma.mixed is a Symbol, not an exception from the getter. Normalize it
+      // before token formatting and preserve actual style runs for full reads.
+      info.fontSize = typeof node.fontSize === "symbol" ? "mixed" : node.fontSize;
+      info.fontFamily = typeof node.fontName === "symbol" ? "mixed" : (node.fontName ? node.fontName.family : null);
+      info.fontWeight = typeof node.fontName === "symbol" ? "mixed" : (node.fontName ? node.fontName.style : null);
+      if (typeof node.lineHeight === "symbol") info.lineHeight = "mixed";
+      else if (node.lineHeight) {
         if (node.lineHeight.unit === "AUTO") info.lineHeight = "auto";
         else if (node.lineHeight.unit === "PERCENT") info.lineHeight = Math.round(node.lineHeight.value) + "%";
         else info.lineHeight = node.lineHeight.value;
       }
-      if (node.letterSpacing && node.letterSpacing.value !== 0) info.letterSpacing = node.letterSpacing.value;
+      if (typeof node.letterSpacing === "symbol") info.letterSpacing = "mixed";
+      else if (node.letterSpacing && node.letterSpacing.value !== 0) info.letterSpacing = node.letterSpacing.value;
       info.textAlign = node.textAlignHorizontal;
       if (node.textAlignVertical && node.textAlignVertical !== "TOP") info.textAlignVertical = node.textAlignVertical;
       if (node.textDecoration && node.textDecoration !== "NONE") info.textDecoration = node.textDecoration;
       if (node.textTruncation && node.textTruncation !== "DISABLED") info.textTruncation = node.textTruncation;
       if (node.textAutoResize) info.textAutoResize = node.textAutoResize;
+      var mixedFields = [node.fontName, node.fontSize, node.fills, node.lineHeight, node.letterSpacing, node.textDecoration];
+      if (mixedFields.some(function(value) { return typeof value === "symbol"; })) {
+        info.mixedStyles = true;
+        if (isFull && typeof node.getStyledTextSegments === "function" && node.characters.length) {
+          info.segments = node.getStyledTextSegments(["fontName", "fontSize", "fills"]).map(function(segment) {
+            var result = { text: segment.characters, fontFamily: segment.fontName.family, fontWeight: segment.fontName.style, fontSize: segment.fontSize };
+            if (segment.fills && segment.fills[0] && segment.fills[0].type === "SOLID") result.fill = rgbToHex(segment.fills[0].color);
+            return result;
+          });
+        }
+      }
     } catch(e) {
       // Mixed text styles — extract per-segment with style runs
       try {
@@ -372,8 +387,9 @@ function extractDesignTree(node, depth, maxDepth, detailLevel, filterInvisible) 
     try { info.description = node.description; } catch(e) {}
     // Expose component property definitions for COMPONENT/COMPONENT_SET
     try {
-      if (node.componentPropertyDefinitions) {
-        var defs = node.componentPropertyDefinitions;
+      var propertyOwner = getComponentPropertyOwner(node);
+      if (propertyOwner.componentPropertyDefinitions) {
+        var defs = propertyOwner.componentPropertyDefinitions;
         var defKeys = Object.keys(defs);
         if (defKeys.length > 0) {
           info.componentPropertyDefinitions = {};
@@ -455,10 +471,14 @@ function extractTokens(tree) {
   function walk(node) {
     if (node.fill)   colors.add(node.fill);
     if (node.stroke) colors.add(node.stroke);
-    if (node.fontFamily && node.fontWeight) fonts.add(`${node.fontFamily}/${node.fontWeight}/${node.fontSize}px`);
+    if (typeof node.fontFamily === "string" && node.fontFamily !== "mixed" &&
+        typeof node.fontWeight === "string" && node.fontWeight !== "mixed" && typeof node.fontSize === "number") {
+      fonts.add(`${node.fontFamily}/${node.fontWeight}/${node.fontSize}px`);
+    }
     if (node.width)  sizes.add(node.width);
     if (node.height) sizes.add(node.height);
     (node.children || []).forEach(walk);
+    (node.segments || []).forEach(walk);
   }
   walk(tree);
 
