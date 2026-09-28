@@ -17,6 +17,8 @@ import { getDocs } from "./api-docs.js";
 
 let bridge;
 let useHttpProxy = false;
+let connectionAttempt = null;
+let shuttingDown = false;
 
 // HTTP proxy: forwards operations to existing bridge via /exec endpoint
 const httpProxy = {
@@ -24,12 +26,12 @@ const httpProxy = {
   isPluginConnected() { return true; }, // delegate health check to actual call
   get queueLength()  { return 0; },
   get lastPollAt()   { return Date.now(); },
-  async sendOperation(operation, params = {}) {
+  async sendOperation(operation, params = {}, sessionId) {
     return new Promise((resolve, reject) => {
       const payload = JSON.stringify({ operation, params });
       const req = http.request({
         hostname: "127.0.0.1", port: CONFIG.PORT,
-        path: "/exec", method: "POST",
+        path: "/exec" + (sessionId ? "?sessionId=" + encodeURIComponent(sessionId) : ""), method: "POST",
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
       }, res => {
         let data = "";
@@ -57,50 +59,77 @@ const httpProxy = {
         let data = "";
         res.on("data", chunk => data += chunk);
         res.on("end", () => {
-          try { resolve(JSON.parse(data)); } catch { resolve({ pluginConnected: false }); }
+          try {
+            const health = JSON.parse(data);
+            resolve(res.statusCode === 200 && health && typeof health.pluginConnected === "boolean" ? health : {});
+          } catch { resolve({}); }
         });
+        res.on("error", () => resolve({}));
       });
-      req.on("error", () => resolve({ pluginConnected: false }));
-      req.setTimeout(2000, () => { req.destroy(); resolve({ pluginConnected: false }); });
+      // No bridge and a live bridge waiting for its plugin are different states.
+      req.on("error", () => resolve({}));
+      req.setTimeout(2000, () => { req.destroy(); resolve({}); });
       req.end();
     });
   },
 };
 
-// Check for an existing healthy bridge BEFORE starting our own.
-// If one already exists and has the plugin connected, use HTTP proxy immediately.
-// This prevents fallback sessions from starting unnecessary local bridges that
-// #killStaleBridges() in later sessions might misclassify and kill.
-const existingHealth = await httpProxy.checkHealth();
-if (existingHealth.pluginConnected) {
-  useHttpProxy = true;
-  bridge = httpProxy;
-  process.stderr.write("[figma-ui-mcp] Existing bridge detected with plugin connected, using HTTP proxy\n");
-} else {
-  // No healthy primary bridge — try to start our own
+// Startup and proxy failover share one ownership decision. Concurrent tool calls
+// must not create multiple listeners or switch our own listener into proxy mode.
+async function connectBridge() {
+  if (connectionAttempt) return connectionAttempt;
+  if (shuttingDown) throw new Error("Bridge is shutting down");
+  if (bridge && !useHttpProxy) return;
+  connectionAttempt = establishBridge();
   try {
-    bridge = await new BridgeServer().start();
-    process.stderr.write("[figma-ui-mcp] Bridge started on port " + bridge.port + "\n");
-  } catch (e) {
+    await connectionAttempt;
+  } finally {
+    connectionAttempt = null;
+    if (shuttingDown && bridge && !useHttpProxy) bridge.stop();
+  }
+}
+
+async function establishBridge() {
+  // Reuse a responsive bridge even while its plugin is disconnected. Plugin
+  // presence is session health, not permission to start another bridge process.
+  const existingHealth = await httpProxy.checkHealth();
+  if (typeof existingHealth.pluginConnected === "boolean") {
     useHttpProxy = true;
     bridge = httpProxy;
-    process.stderr.write("[figma-ui-mcp] Bridge failed, connecting to existing bridge on port " + CONFIG.PORT + "\n");
-  }
-
-  // BridgeServer.start() never throws on EADDRINUSE (retries next port).
-  // If it ended up on a fallback port but primary port has a live bridge, switch to proxy.
-  if (!useHttpProxy && bridge.port !== CONFIG.PORT) {
-    const primaryHealth = await httpProxy.checkHealth();
-    if (primaryHealth.pluginConnected !== undefined) {
-      // A figma-ui-mcp bridge already owns the primary port — we are a redundant session.
-      // Stop our local bridge and use HTTP proxy to avoid being killed as "stale".
-      bridge.stop();
+    process.stderr.write("[figma-ui-mcp] Existing bridge detected, using HTTP proxy\n");
+  } else {
+    // No healthy primary bridge — try to start our own
+    try {
+      bridge = await new BridgeServer().start();
+      useHttpProxy = false;
+      process.stderr.write("[figma-ui-mcp] Bridge started on port " + bridge.port + "\n");
+    } catch (e) {
+      // Another process may have acquired the port after our initial probe. Only
+      // proxy to a verified bridge; unrelated services and bind failures stay errors.
+      const primaryHealth = await httpProxy.checkHealth();
+      if (typeof primaryHealth.pluginConnected !== "boolean") throw e;
       useHttpProxy = true;
       bridge = httpProxy;
-      process.stderr.write("[figma-ui-mcp] Primary bridge exists on port " + CONFIG.PORT + ", switching to HTTP proxy\n");
+      process.stderr.write("[figma-ui-mcp] Bridge failed, connecting to existing bridge on port " + CONFIG.PORT + "\n");
+    }
+
+    // A concurrent startup can win the primary port while we bind a fallback.
+    // Release our redundant listener once the primary is confirmed as a bridge.
+    if (!useHttpProxy && bridge.port !== CONFIG.PORT) {
+      const primaryHealth = await httpProxy.checkHealth();
+      if (typeof primaryHealth.pluginConnected === "boolean") {
+        // A figma-ui-mcp bridge already owns the primary port — we are a redundant session.
+        // Stop only the listener owned by this process and reuse the primary.
+        bridge.stop();
+        useHttpProxy = true;
+        bridge = httpProxy;
+        process.stderr.write("[figma-ui-mcp] Primary bridge exists on port " + CONFIG.PORT + ", switching to HTTP proxy\n");
+      }
     }
   }
 }
+
+await connectBridge();
 
 const server = new Server(
   { name: "figma-ui-mcp", version: "2.5.13" },
@@ -110,14 +139,25 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
 server.setRequestHandler(CallToolRequestSchema, async ({ params: { name, arguments: args } }) => {
+  let proxyHealth = {};
+  if (["figma_status", "figma_write", "figma_read", "figma_rules"].includes(name) && useHttpProxy) {
+    proxyHealth = await httpProxy.checkHealth();
+    if (typeof proxyHealth.pluginConnected !== "boolean") {
+      // Recover ownership before accepting a new command if the previous MCP
+      // owner exited. Never replay an operation whose result is already unknown.
+      try { await connectBridge(); }
+      catch (error) { return err("Bridge connection failed: " + error.message); }
+      if (useHttpProxy) proxyHealth = await httpProxy.checkHealth();
+    }
+  }
 
   // ── figma_status ──────────────────────────────────────────────────────────
   if (name === "figma_status") {
     let connected, pluginInfo = null, healthData = {};
 
     if (useHttpProxy) {
-      healthData = await httpProxy.checkHealth();
-      connected = healthData.pluginConnected;
+      healthData = proxyHealth;
+      connected = Boolean(healthData.pluginConnected);
       if (connected) {
         try { pluginInfo = await bridge.sendOperation("status", {}); } catch { /* brief disconnect */ }
       }
@@ -151,8 +191,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params: { name, argumen
   // ── figma_write ───────────────────────────────────────────────────────────
   if (name === "figma_write") {
     if (useHttpProxy) {
-      const health = await httpProxy.checkHealth();
-      if (!health.pluginConnected) return notConnected();
+      if (!proxyHealth.pluginConnected) return notConnected();
     } else if (!bridge.isPluginConnected()) return notConnected();
 
     const code = args?.code;
@@ -170,8 +209,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params: { name, argumen
   // ── figma_read ────────────────────────────────────────────────────────────
   if (name === "figma_read") {
     if (useHttpProxy) {
-      const health = await httpProxy.checkHealth();
-      if (!health.pluginConnected) return notConnected();
+      if (!proxyHealth.pluginConnected) return notConnected();
     } else if (!bridge.isPluginConnected()) return notConnected();
 
     const { operation, nodeId, nodeName, scale, depth, format, detail, includeHidden, sessionId: readSessionId, ...searchParams } = args || {};
@@ -219,8 +257,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params: { name, argumen
   // prompt-injectable markdown block. Equivalent to official MCP's create_design_system_rules.
   if (name === "figma_rules") {
     if (useHttpProxy) {
-      const health = await httpProxy.checkHealth();
-      if (!health.pluginConnected) return notConnected();
+      if (!proxyHealth.pluginConnected) return notConnected();
     } else if (!bridge.isPluginConnected()) return notConnected();
 
     const sessionId = args?.sessionId;
@@ -316,4 +353,23 @@ function err(msg) {
   return { isError: true, content: [{ type: "text", text: msg }] };
 }
 
+// The stdio transport does not close the HTTP listener when stdin reaches EOF.
+// Release our own bridge at session end instead of leaving orphan processes for
+// later sessions to discover. A proxy session must never stop the shared owner.
+server.onclose = () => {
+  shuttingDown = true;
+  if (!useHttpProxy) bridge.stop();
+};
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (!useHttpProxy) bridge.stop();
+  server.close().catch(error => {
+    process.stderr.write("[figma-ui-mcp] Shutdown failed: " + error.message + "\n");
+    process.exitCode = 1;
+  });
+}
+process.stdin.once("end", shutdown);
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);
 await server.connect(new StdioServerTransport());

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Keep one polling owner across reconnects, use a request-scoped 12-second deadline for all 8-second long polls, and leave healthy polls running when a tab becomes visible.
+- Deliver already-received commands once and return their results to the originating bridge after a port switch.
+- Bind the bridge to the same IPv4 loopback address used by health checks and proxy requests. Preserve occupied ports, reject bind failures, and reuse responsive bridges even when their plugin is temporarily disconnected.
+- Release listeners, long polls, pending operations, and timeout indexes at session shutdown. Proxy sessions can acquire a new bridge after the shared owner exits; concurrent connection attempts are coalesced and operations are never automatically replayed.
+- Preserve explicit document session IDs through the HTTP proxy.
+- Apply auto-layout updates to components and instances, and honor explicit text sizing, constraints, positioning, stroke weight, and description updates.
+- Implement the documented `setReactions`, `getReactions`, and `removeReactions` handlers, including `NAVIGATE` shorthand and native reaction payloads.
+
+### Tests
+- `npm run build:plugin && npm run test:regressions` runs deterministic polling tests, isolated HTTP/MCP lifecycle tests, and bundled plugin handler tests without a live Figma document.
+
 ## [2.5.26] — 2026-05-25
 
 ### Fixed — 10 bugs from field report (Clean Master Plus project)

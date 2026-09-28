@@ -118,3 +118,42 @@ handlers.batch = async function(params) {
   }
   return { results: results, total: operations.length, succeeded: results.filter(function(r) { return r.success; }).length };
 };
+
+// Expose the documented prototype operations using the public Figma API.
+// These handlers accept reaction data only; they do not evaluate plugin code.
+function normalizeReactionAction(action) {
+  if (!action || typeof action !== "object" || Array.isArray(action)) throw new Error("Each action must be an object");
+  if (action.type !== "NAVIGATE") return action;
+  // NAVIGATE is the bridge's documented shorthand; native Figma uses NODE.
+  return Object.assign({}, action, { type: "NODE", navigation: "NAVIGATE" });
+}
+
+handlers.setReactions = async function(params) {
+  var node = await resolveNode(params);
+  if (!node || typeof node.setReactionsAsync !== 'function') throw new Error('Target does not support prototype reactions');
+  if (!Array.isArray(params.reactions)) throw new Error('reactions must be an array');
+  var reactions = params.reactions.map(function(reaction) {
+    if (!reaction || typeof reaction !== "object" || Array.isArray(reaction)) throw new Error("Each reaction must be an object");
+    var result = Object.assign({}, reaction);
+    if (reaction.actions !== undefined) {
+      if (!Array.isArray(reaction.actions)) throw new Error("actions must be an array");
+      result.actions = reaction.actions.map(normalizeReactionAction);
+    }
+    // Preserve native single-action reactions instead of replacing them with [].
+    if (reaction.action != null) result.action = normalizeReactionAction(reaction.action);
+    return result;
+  });
+  await node.setReactionsAsync(reactions);
+  return { id: node.id, reactions: node.reactions };
+};
+
+handlers.getReactions = async function(params) {
+  var node = await resolveNode(params);
+  if (!node || !('reactions' in node)) throw new Error('Target does not support prototype reactions');
+  return { id: node.id, reactions: node.reactions };
+};
+
+handlers.removeReactions = async function(params) {
+  // Clearing uses the same capability checks and async setter as replacement.
+  return handlers.setReactions(Object.assign({}, params, { reactions: [] }));
+};

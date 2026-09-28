@@ -5,7 +5,9 @@ import http from "node:http";
 export const CONFIG = {
   PORT: parseInt(process.env.FIGMA_MCP_PORT || "38451", 10),
   PORT_RANGE: 10,
-  HOST: null,
+  // Match the health/proxy destination. On systems with separate IPv4/IPv6
+  // listeners, an unspecified host can bind the same port on the wrong family.
+  HOST: "127.0.0.1",
   OP_TIMEOUT_MS: 60_000,
   MAX_BODY_BYTES: 5_000_000,
   MAX_QUEUE: 50,
@@ -147,6 +149,7 @@ export class BridgeServer {
       var timer = setTimeout(function() {
         session.pending.delete(opId);
         session.queue = session.queue.filter(function(r) { return r.id !== opId; });
+        self.#opToSession.delete(opId);
         reject(new Error("Operation \"" + operation + "\" timed out after " + timeout + "ms"));
       }, timeout);
       session.pending.set(opId, { resolve: resolve, reject: reject, timer: timer, startMs: Date.now() });
@@ -362,77 +365,56 @@ export class BridgeServer {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  async #killStaleBridges() {
-    var port = CONFIG.PORT;
-    try {
-      var isZombie = await new Promise(function(resolve) {
-        var req = http.get({ hostname: "127.0.0.1", port: port, path: "/health", timeout: 800 }, function(res) {
-          var data = "";
-          res.on("data", function(c) { data += c; });
-          res.on("end", function() {
-            try { var j = JSON.parse(data); resolve(j.pluginConnected === undefined); }
-            catch(e) { resolve(true); }
-          });
-        });
-        req.on("error", function() { resolve(false); });
-        req.on("timeout", function() { req.destroy(); resolve(false); });
-      });
-      if (!isZombie) return;   // someone else's healthy bridge — leave it alone
-      // Zombie detected — kill ALL PIDs holding the port (was: only first PID)
+  async start() {
+    // Binding, not an HTTP probe or a PID lookup, determines port ownership.
+    // An unrelated HTTP service must never be killed to make room for a bridge.
+    for (var attempt = 0; attempt < CONFIG.PORT_RANGE; attempt++) {
+      var port = CONFIG.PORT + attempt;
+      const server = http.createServer((req, res) => this.#route(req, res));
       try {
-        var m = await import("node:child_process");
-        var pids = m.execSync("lsof -ti tcp:" + port + " 2>/dev/null", { encoding: "utf8" })
-          .trim().split(/\s+/).filter(function(p) { return p && parseInt(p, 10) !== process.pid; });
-        if (pids.length > 0) {
-          for (var i = 0; i < pids.length; i++) {
-            try { m.execSync("kill -9 " + pids[i] + " 2>/dev/null"); } catch(e) {}
-          }
-          process.stderr.write("[figma-ui-mcp] Killed " + pids.length + " zombie(s) on port " + port + ": " + pids.join(",") + "\n");
-          await new Promise(function(r) { setTimeout(r, 300); });
-        }
-      } catch(e) { /* ignore */ }
-    } catch(e) { /* ignore */ }
-  }
-
-  start() {
-    var self = this;
-    return new Promise(async function(resolve) {
-      await self.#killStaleBridges();
-
-      var tryPort = function(port, attempt) {
-        if (attempt >= CONFIG.PORT_RANGE) {
-          process.stderr.write("[figma-ui-mcp] All ports " + CONFIG.PORT + "-" + (CONFIG.PORT + CONFIG.PORT_RANGE - 1) + " in use.\n");
-          resolve(self);
-          return;
-        }
-        self.#server = http.createServer(function(req, res) { self.#route(req, res); });
-        self.#server.once("error", function(err) {
-          if (err.code === "EADDRINUSE") {
-            process.stderr.write("[figma-ui-mcp] Port " + port + " in use — trying " + (port + 1) + "...\n");
-            tryPort(port + 1, attempt + 1);
-          } else {
-            process.stderr.write("[figma-ui-mcp bridge] " + err.message + "\n");
-            resolve(self);
-          }
+        await new Promise((resolve, reject) => {
+          function onError(error) { server.removeListener("listening", onListening); reject(error); }
+          function onListening() { server.removeListener("error", onError); resolve(); }
+          server.once("error", onError);
+          server.once("listening", onListening);
+          server.listen(port, CONFIG.HOST);
         });
-        self.#server.once("listening", function() {
-          self.#actualPort = port;
-          resolve(self);
-        });
-        self.#server.listen(port, CONFIG.HOST);
-      };
-      tryPort(CONFIG.PORT, 0);
-    });
+        this.#server = server;
+        this.#actualPort = server.address().port;
+        return this;
+      } catch (error) {
+        // Only a port conflict can be resolved by the next candidate. Exhaustion
+        // and other bind errors must reject, never report an unbound server ready.
+        if (error.code !== "EADDRINUSE" || attempt + 1 >= CONFIG.PORT_RANGE) throw error;
+        process.stderr.write("[figma-ui-mcp] Port " + port + " in use — trying " + (port + 1) + "...\n");
+      }
+    }
+    throw new Error("Bridge port range must contain at least one port");
   }
 
   stop() {
-    if (this.#server) { this.#server.close(); this.#server = null; }
-    for (var [id, sid] of this.#opToSession) {
-      var s = this.#sessions.get(sid);
-      if (s) {
-        var p = s.pending.get(id);
-        if (p) { clearTimeout(p.timer); p.reject(new Error("Bridge shutting down")); }
+    // End held polls before closing the listener so shutdown does not wait for
+    // the long-poll deadline or leave session timers keeping the process alive.
+    for (var s of this.#sessions.values()) {
+      if (s.longPoll) {
+        var waiter = s.longPoll;
+        s.longPoll = null;
+        clearTimeout(waiter.timer);
+        waiter.res.writeHead(503);
+        waiter.res.end(JSON.stringify({ error: "Bridge shutting down" }));
       }
+      for (var p of s.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error("Bridge shutting down"));
+      }
+      s.pending.clear();
+      s.queue.length = 0;
+    }
+    if (this.#server) {
+      this.#server.close();
+      // Available since Node 18.2; older supported Node releases close normally.
+      if (this.#server.closeIdleConnections) this.#server.closeIdleConnections();
+      this.#server = null;
     }
     this.#opToSession.clear();
     this.#sessions.clear();

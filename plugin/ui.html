@@ -166,7 +166,6 @@
     var POLL_MS = 300;
     var POLL_MAX_MS = 3000;         // lower cap — recover faster
     var LONG_POLL_TIMEOUT = 12000;  // server holds 8s + network buffer
-    var SHORT_POLL_TIMEOUT = 3000;  // used when reconnecting (no long poll)
     var consecutiveErrors = 0;
     var everConnected = false;      // track if we ever had a successful connection
     var lastSuccessfulPollAt = Date.now();  // for visibility-driven reconnect heuristic
@@ -175,6 +174,7 @@
 
     var writeCount = 0, readCount = 0, errCount = 0;
     var polling = true;
+    var responseBridges = new Map();
 
     var logEl    = document.getElementById("log");
     var dotEl    = document.getElementById("dot");
@@ -208,95 +208,117 @@
     }
 
     async function sendResponse(id, success, data, error) {
+      // A port switch must not redirect a command's result to a different bridge.
+      var responseBridge = responseBridges.get(id) || BRIDGE;
       try {
-        await fetch(BRIDGE + "/response", {
+        await fetch(responseBridge + "/response", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: id, success: success, data: data !== undefined ? data : null, error: error !== undefined ? error : null })
         });
       } catch (e) {
         log("Response failed: " + e.message, "err");
+      } finally {
+        responseBridges.delete(id);
       }
     }
 
-    function dispatchToMain(req) {
+    function dispatchToMain(req, bridgeUrl) {
+      responseBridges.set(req.id, bridgeUrl);
       parent.postMessage({ pluginMessage: req }, "*");
     }
 
-    var activeAbortController = null;   // exposed so reconnect() can cancel an in-flight long poll
+    var activeAbortController = null;
+    var pollGeneration = 0;
+    var restartTimer = null;
 
-    async function poll() {
-      while (polling) {
+    async function poll(generation) {
+      if (generation === undefined) generation = pollGeneration;
+      // A reconnect invalidates the previous owner even if its sleep/fetch finishes later.
+      while (polling && generation === pollGeneration) {
+        const controller = new AbortController();
+        let timedOut = false;
+        var retryDelay = POLL_MS;
+        activeAbortController = controller;
+        // Every /poll can wait 8s on the bridge, including the first request after an error.
+        // Capture this request's controller; a global reference can point at a newer request.
+        var timeoutId = setTimeout(function() {
+          timedOut = true;
+          controller.abort();
+        }, LONG_POLL_TIMEOUT);
         try {
-          var pollUrl = BRIDGE + "/poll";
+          var pollBridge = BRIDGE;
+          var pollUrl = pollBridge + "/poll";
           var qs = [];
           if (sessionId) qs.push("sessionId=" + encodeURIComponent(sessionId));
           if (fileName) qs.push("fileName=" + encodeURIComponent(fileName));
           if (qs.length) pollUrl += "?" + qs.join("&");
-          // Use short timeout when reconnecting, long poll when stable
-          var fetchTimeout = consecutiveErrors > 0 ? SHORT_POLL_TIMEOUT : LONG_POLL_TIMEOUT;
-          activeAbortController = new AbortController();
-          var timeoutId = setTimeout(function() { activeAbortController.abort(); }, fetchTimeout);
-          var res;
-          try { res = await fetch(pollUrl, { signal: activeAbortController.signal }); }
-          finally { clearTimeout(timeoutId); activeAbortController = null; }
-          if (!res.ok) { setStatus("yellow", "Bridge not responding"); consecutiveErrors++; await sleep(getBackoff()); continue; }
-
+          var res = await fetch(pollUrl, { signal: controller.signal, cache: "no-store" });
+          if (!res.ok) throw new Error("Bridge HTTP " + res.status);
           var body = await res.json();
+          if (!Array.isArray(body.requests)) throw new Error("Invalid bridge poll response");
           var reqs = body.requests;
-          setStatus("green", reqs.length ? reqs.length + " cmd(s)" : "Connected", body.mode || "ready");
 
-          consecutiveErrors = 0;
-          everConnected = true;
-          lastSuccessfulPollAt = Date.now();
-
+          if (polling && generation === pollGeneration) {
+            setStatus("green", reqs.length ? reqs.length + " cmd(s)" : "Connected", body.mode || "ready");
+            consecutiveErrors = 0;
+            everConnected = true;
+            lastSuccessfulPollAt = Date.now();
+          }
+          // Requests already received were removed from the bridge queue. Deliver them once,
+          // even if a manual reconnect happened while the response body was being decoded.
           for (var i = 0; i < reqs.length; i++) {
             var req = reqs[i];
             log("→ " + req.operation, READ_OPS.indexOf(req.operation) >= 0 ? "info" : "ok");
-            dispatchToMain(req);
+            dispatchToMain(req, pollBridge);
           }
         } catch (e) {
+          // Intentional cancellation is not a network failure and must not repaint the new owner.
+          if (!polling || generation !== pollGeneration) return;
           consecutiveErrors++;
-          var backoff = getBackoff();
+          retryDelay = getBackoff();
           if (consecutiveErrors <= 5) {
             setStatus("yellow", "Waiting for MCP server... (" + consecutiveErrors + ")");
           } else if (consecutiveErrors <= 10) {
-            setStatus("yellow", "Still waiting — first run may take 15s to download");
+            setStatus("yellow", "Reconnecting to local bridge...");
           } else {
             setStatus("red", "Cannot connect — run: npx figma-ui-mcp");
           }
-          if (consecutiveErrors === 1) log("Connecting to bridge — if first run, npx is downloading...", "info");
-          await sleep(backoff);
-          continue;
+          if (consecutiveErrors === 1 || consecutiveErrors % 5 === 0) {
+            log("Poll failed: " + (timedOut ? "timeout after " + LONG_POLL_TIMEOUT + "ms" : e.name + ": " + e.message), "err");
+          }
+        } finally {
+          clearTimeout(timeoutId);
+          if (activeAbortController === controller) activeAbortController = null;
         }
-        await sleep(POLL_MS);
+        if (!polling || generation !== pollGeneration) return;
+        await sleep(retryDelay);
       }
     }
 
     function reconnect() {
       polling = false;
-      // Abort the in-flight long poll so the loop exits immediately,
-      // otherwise it sits inside `await fetch(...)` for up to 12s.
-      if (activeAbortController) {
-        try { activeAbortController.abort(); } catch (e) {}
-      }
+      var generation = ++pollGeneration;
+      if (restartTimer !== null) clearTimeout(restartTimer);
+      var previous = activeAbortController;
+      activeAbortController = null;
+      if (previous) { try { previous.abort(); } catch (e) {} }
       consecutiveErrors = 0;
       setStatus("yellow", "Reconnecting...");
-      setTimeout(function() { polling = true; poll(); }, 300);
+      restartTimer = setTimeout(function() {
+        if (generation !== pollGeneration) return;
+        restartTimer = null;
+        polling = true;
+        poll(generation);
+      }, 300);
     }
 
-    // Tab visibility — when user returns to Figma after a long pause,
-    // immediately force-reconnect so they don't wait for the next poll cycle
-    // (browsers throttle background fetch to ~1Hz; HEALTH_TTL may have expired).
     document.addEventListener("visibilitychange", function() {
       if (document.visibilityState !== "visible" || !everConnected) return;
       var idleMs = Date.now() - lastSuccessfulPollAt;
-      // Force reconnect if any of:
-      //  - in-flight poll (might be stuck on a backgrounded socket)
-      //  - last successful poll was > 20s ago (server may have expired session)
-      //  - consecutive errors
-      if (consecutiveErrors > 0 || activeAbortController || idleMs > 20000) {
-        log("Tab visible after " + Math.round(idleMs / 1000) + "s — forcing reconnect", "info");
+      // An active 8-second long poll is normal. Reconnect only after real failure or staleness.
+      if (consecutiveErrors > 0 || idleMs > 20000) {
+        log("Tab visible after " + Math.round(idleMs / 1000) + "s — reconnecting stale poll", "info");
         reconnect();
       }
     });

@@ -565,13 +565,15 @@ handlers.modify = async (params) => {
     }
   }
 
-  // Auto Layout properties on FRAME
-  if (node.type === "FRAME") {
+  // Components and instances expose the same auto-layout contract as frames.
+  // Restricting this branch to FRAME silently ignored master sizing changes,
+  // forcing duplicate components instead of reusable responsive instances.
+  if ("layoutMode" in node) {
     var removingLayout = params.layoutMode === "NONE" || params.layoutMode === null || params.layoutMode === "";
     if (params.layoutMode !== undefined) {
       node.layoutMode = removingLayout ? "NONE" : params.layoutMode;
     }
-    // Only apply align/spacing when the frame actually has auto-layout active
+    // Only apply alignment when the target actually has auto-layout active.
     if (node.layoutMode !== "NONE") {
       if (params.primaryAxisAlignItems !== undefined) node.primaryAxisAlignItems = params.primaryAxisAlignItems;
       if (params.counterAxisAlignItems === "STRETCH") {
@@ -598,6 +600,13 @@ handlers.modify = async (params) => {
   }
 
   applyChildLayout(node, params);
+  // Honor explicit overrides even when no text content or stroke color changed.
+  // Capability checks keep these optional properties off unsupported node types.
+  if (params.constraints !== undefined && "constraints" in node) node.constraints = params.constraints;
+  if (params.layoutPositioning !== undefined && "layoutPositioning" in node) node.layoutPositioning = params.layoutPositioning;
+  if (params.textAutoResize !== undefined && node.type === "TEXT") node.textAutoResize = params.textAutoResize;
+  if (params.strokeWeight !== undefined && "strokeWeight" in node) node.strokeWeight = params.strokeWeight;
+  if (params.description !== undefined && "description" in node) node.description = params.description;
 
   return nodeToInfo(node);
 };
