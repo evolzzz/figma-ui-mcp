@@ -63,7 +63,12 @@ test("ambiguous property labels require full IDs instead of modifying the first 
 
 test("variant dimensions cannot be removed using the ordinary property API", async () => {
   const p = variantFixture();
-  await assert.rejects(p.handlers.removeComponentProperty({ componentId: "variant", propertyName: "State" }), /VARIANT properties/);
+  await assert.rejects(p.handlers.removeComponentProperty({ componentId: "variant", propertyName: "State" }), error => {
+    assert.match(error.message, /VARIANT property "State"/);
+    assert.match(error.message, /with removeComponentProperty/);
+    assert.match(error.message, /deleteComponentProperty supports BOOLEAN, TEXT, INSTANCE_SWAP, and SLOT/);
+    return true;
+  });
   assert.ok(p.owner.componentPropertyDefinitions.State);
 });
 

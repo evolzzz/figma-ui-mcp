@@ -1100,7 +1100,10 @@ handlers.removeComponentProperty = async function(params) {
   }
 
   if (node.componentPropertyDefinitions[resolved].type === "VARIANT") {
-    throw new Error("VARIANT properties are managed through component variant names and cannot be deleted with removeComponentProperty.");
+    throw new Error(
+      "Cannot remove VARIANT property " + JSON.stringify(resolved) + " with removeComponentProperty. " +
+      "Figma's deleteComponentProperty supports BOOLEAN, TEXT, INSTANCE_SWAP, and SLOT."
+    );
   }
   node.deleteComponentProperty(resolved);
 
